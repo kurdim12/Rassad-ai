@@ -1,0 +1,27 @@
+services:
+  backend:
+    build: ./backend
+    container_name: rasad-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - SERPER_API_KEY=${SERPER_API_KEY:-}
+      - ALLOWED_ORIGINS=http://localhost:8080,http://localhost:5173
+      - ENVIRONMENT=production
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: rasad-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
