@@ -1,11 +1,31 @@
 import { motion } from "framer-motion";
 import { ArrowDown, Shield, Zap } from "lucide-react";
+import { StatsBar } from "./StatsBar";
 
 export function Hero() {
   return (
     <section className="relative pt-16 pb-20 sm:pt-24 sm:pb-28 overflow-hidden">
-      {/* Decorative grid */}
-      <div className="absolute inset-0 -z-10 opacity-[0.07] [background-image:linear-gradient(white_1px,transparent_1px),linear-gradient(90deg,white_1px,transparent_1px)] [background-size:48px_48px]" />
+      {/* Animated gradient blobs */}
+      <motion.div
+        aria-hidden
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 1.2 }}
+        className="absolute inset-0 -z-10"
+      >
+        <div className="absolute -top-32 -right-32 h-[480px] w-[480px] rounded-full bg-brand-500/30 blur-3xl animate-pulse-slow" />
+        <div
+          className="absolute top-1/3 -left-32 h-[420px] w-[420px] rounded-full bg-violet-500/25 blur-3xl animate-pulse-slow"
+          style={{ animationDelay: "1s" }}
+        />
+        <div
+          className="absolute bottom-0 right-1/4 h-[360px] w-[360px] rounded-full bg-emerald-500/20 blur-3xl animate-pulse-slow"
+          style={{ animationDelay: "2s" }}
+        />
+      </motion.div>
+
+      {/* Subtle grid */}
+      <div className="absolute inset-0 -z-10 opacity-[0.06] [background-image:linear-gradient(white_1px,transparent_1px),linear-gradient(90deg,white_1px,transparent_1px)] [background-size:48px_48px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_40%,black,transparent)]" />
 
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 text-center">
         <motion.div
@@ -58,29 +78,7 @@ export function Hero() {
           </a>
         </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.8, delay: 0.4 }}
-          className="mt-16 grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-3xl mx-auto"
-        >
-          {[
-            { v: "6", l: "وكلاء متخصصون" },
-            { v: "+7", l: "محركات بحث" },
-            { v: "<15", l: "ثانية للحكم" },
-            { v: "100%", l: "عربي RTL" },
-          ].map((s) => (
-            <div
-              key={s.l}
-              className="glass rounded-2xl px-4 py-5 text-center"
-            >
-              <div className="text-3xl font-extrabold bg-gradient-to-l from-brand-300 to-violet-300 bg-clip-text text-transparent">
-                {s.v}
-              </div>
-              <div className="text-xs text-slate-400 mt-1">{s.l}</div>
-            </div>
-          ))}
-        </motion.div>
+        <StatsBar />
       </div>
     </section>
   );

@@ -18,7 +18,7 @@ from typing import Tuple
 from PIL import ExifTags, Image
 
 from .models import ImageCheckResult, Verdict
-from .services.gemini import get_gemini
+from .services.gemini import GeminiClient, get_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,11 @@ def _heuristic_score(image: Image.Image, exif: dict) -> Tuple[float, list[str]]:
     return min(score, 0.99), indicators
 
 
-async def analyse_image(image_bytes: bytes, use_gemini: bool = True) -> ImageCheckResult:
+async def analyse_image(
+    image_bytes: bytes,
+    use_gemini: bool = True,
+    api_key: str | None = None,
+) -> ImageCheckResult:
     image_id = hashlib.sha256(image_bytes).hexdigest()[:12]
     image = Image.open(io.BytesIO(image_bytes))
     image.load()
@@ -91,7 +95,7 @@ async def analyse_image(image_bytes: bytes, use_gemini: bool = True) -> ImageChe
         else "التحليل الأولي غير حاسم. مطلوب فحص بصري إضافي."
     )
 
-    gemini = get_gemini()
+    gemini = GeminiClient.for_request(api_key)
     if use_gemini and gemini.available:
         try:
             verdict_data = await asyncio.to_thread(_gemini_vision, gemini, image_bytes)
@@ -121,6 +125,37 @@ async def analyse_image(image_bytes: bytes, use_gemini: bool = True) -> ImageChe
         },
         demo_mode=not gemini.available,
     )
+
+
+async def extract_text_from_image(
+    image_bytes: bytes,
+    api_key: str | None = None,
+) -> str:
+    """Use Gemini Vision to pull out any Arabic / English text from an image.
+
+    In demo mode (no key) returns empty string and the caller can use the
+    image bytes elsewhere.
+    """
+    gemini = GeminiClient.for_request(api_key)
+    if not gemini.available:
+        return ""
+
+    def _call() -> str:
+        image_part = {
+            "mime_type": "image/jpeg",
+            "data": base64.b64encode(image_bytes).decode("utf-8"),
+        }
+        response = gemini._model.generate_content(
+            [
+                "استخرج النص الرئيسي من الصورة كما هو (عربي أو إنجليزي). "
+                "أعد النص فقط، دون أي تعليق أو شرح.",
+                image_part,
+            ],
+            generation_config={"temperature": 0.0, "max_output_tokens": 1024},
+        )
+        return (response.text or "").strip()
+
+    return await asyncio.to_thread(_call)
 
 
 def _gemini_vision(client, image_bytes: bytes) -> dict:

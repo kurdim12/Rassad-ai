@@ -18,7 +18,7 @@ from ..models import (
     Verdict,
 )
 from ..services.cache import cache
-from ..services.gemini import get_gemini
+from ..services.gemini import GeminiClient, get_gemini
 from ..services.scraper import fetch_article
 from ..services.search import get_search
 from .prompts import (
@@ -35,9 +35,9 @@ logger = logging.getLogger(__name__)
 class FactCheckPipeline:
     """End-to-end fact-checking orchestrator."""
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         self.settings = get_settings()
-        self.gemini = get_gemini()
+        self.gemini = GeminiClient.for_request(api_key)
         self.search = get_search()
 
     async def run(
@@ -46,6 +46,7 @@ class FactCheckPipeline:
         text: str | None = None,
         url: str | None = None,
         language: str = "ar",
+        on_event=None,
     ) -> CheckResult:
         started = time.time()
 
@@ -67,6 +68,12 @@ class FactCheckPipeline:
 
         # Demo mode: deterministic preset + live free-tier web search.
         if not self.gemini.available:
+            if on_event:
+                await on_event("start", {"claim_id": claim_id, "demo_mode": True})
+                for ag in ["ArabicNLPAgent", "EvidenceAgent", "CredibilityAgent", "FakeNewsAgent", "VerdictAgent"]:
+                    await on_event("agent:start", {"agent": ag})
+                    await asyncio.sleep(0.18)
+                    await on_event("agent:done", {"agent": ag, "summary": "تم في الوضع التجريبي"})
             try:
                 extras = await self.search.search(claim_text[:120], limit=5)
             except Exception:
@@ -80,11 +87,23 @@ class FactCheckPipeline:
                 extra_sources=extras,
             )
             cache.set(cache_key, result)
+            if on_event:
+                await on_event("done", result.model_dump(mode="json"))
             return result
 
         traces: List[AgentTrace] = []
 
+        async def emit(event: str, payload: dict | None = None) -> None:
+            if on_event:
+                try:
+                    await on_event(event, payload or {})
+                except Exception:
+                    pass
+
+        await emit("start", {"claim_id": claim_id, "claim": claim_text[:200]})
+
         # 1. Linguistic analysis
+        await emit("agent:start", {"agent": "ArabicNLPAgent"})
         nlp_started = time.time()
         try:
             nlp_data = await self.gemini.generate_json(
@@ -99,16 +118,17 @@ class FactCheckPipeline:
                 "search_queries": [claim_text[:120]],
                 "claim_type": "factual",
             }
-        traces.append(
-            AgentTrace(
-                agent="ArabicNLPAgent",
-                role="تحليل لغوي للادعاء وتوليد استعلامات بحث",
-                summary=str(nlp_data.get("main_claim", ""))[:200],
-                duration_ms=int((time.time() - nlp_started) * 1000),
-            )
+        nlp_trace = AgentTrace(
+            agent="ArabicNLPAgent",
+            role="تحليل لغوي للادعاء وتوليد استعلامات بحث",
+            summary=str(nlp_data.get("main_claim", ""))[:200],
+            duration_ms=int((time.time() - nlp_started) * 1000),
         )
+        traces.append(nlp_trace)
+        await emit("agent:done", nlp_trace.model_dump())
 
         # 2. Fake-news markers (runs in parallel with evidence retrieval)
+        await emit("agent:start", {"agent": "FakeNewsAgent"})
         fake_task = asyncio.create_task(
             self._safe_json(
                 FAKE_NEWS_PROMPT.format(claim=claim_text[:2000]),
@@ -124,6 +144,7 @@ class FactCheckPipeline:
         )
 
         # 3. Evidence retrieval — search the web with each AI-generated query.
+        await emit("agent:start", {"agent": "EvidenceAgent"})
         evidence_started = time.time()
         queries = list(
             dict.fromkeys(
@@ -150,42 +171,47 @@ class FactCheckPipeline:
         sources.sort(key=lambda s: s.credibility, reverse=True)
         sources = sources[:8]
 
-        traces.append(
-            AgentTrace(
-                agent="EvidenceAgent",
-                role="بحث متعدد المحركات عن مصادر داعمة",
-                summary=f"تم العثور على {len(sources)} مصدر عبر {len(queries)} استعلام",
-                duration_ms=int((time.time() - evidence_started) * 1000),
-            )
+        ev_trace = AgentTrace(
+            agent="EvidenceAgent",
+            role="بحث متعدد المحركات عن مصادر داعمة",
+            summary=f"تم العثور على {len(sources)} مصدر عبر {len(queries)} استعلام",
+            duration_ms=int((time.time() - evidence_started) * 1000),
+        )
+        traces.append(ev_trace)
+        await emit(
+            "agent:done",
+            {**ev_trace.model_dump(), "sources_preview": [s.model_dump() for s in sources[:5]]},
         )
 
         # 4. Credibility — already computed per source.
-        traces.append(
-            AgentTrace(
-                agent="CredibilityAgent",
-                role="تقييم موثوقية المصادر",
-                summary=f"متوسط الموثوقية {self._avg_credibility(sources):.2f}",
-            )
+        await emit("agent:start", {"agent": "CredibilityAgent"})
+        cred_trace = AgentTrace(
+            agent="CredibilityAgent",
+            role="تقييم موثوقية المصادر",
+            summary=f"متوسط الموثوقية {self._avg_credibility(sources):.2f}",
         )
+        traces.append(cred_trace)
+        await emit("agent:done", cred_trace.model_dump())
 
         # 5. Fake-news signals
         fake_signals = await fake_task
-        traces.append(
-            AgentTrace(
-                agent="FakeNewsAgent",
-                role="رصد مؤشرات التلاعب والتهييج",
-                summary=(
-                    f"درجة التلاعب {fake_signals.get('manipulation_score', 0):.2f}"
-                    + (
-                        f" | {len(fake_signals.get('indicators', []))} مؤشر"
-                        if fake_signals.get("indicators")
-                        else ""
-                    )
-                ),
-            )
+        fn_trace = AgentTrace(
+            agent="FakeNewsAgent",
+            role="رصد مؤشرات التلاعب والتهييج",
+            summary=(
+                f"درجة التلاعب {fake_signals.get('manipulation_score', 0):.2f}"
+                + (
+                    f" | {len(fake_signals.get('indicators', []))} مؤشر"
+                    if fake_signals.get("indicators")
+                    else ""
+                )
+            ),
         )
+        traces.append(fn_trace)
+        await emit("agent:done", fn_trace.model_dump())
 
         # 6. Final verdict synthesis
+        await emit("agent:start", {"agent": "VerdictAgent"})
         verdict_started = time.time()
         evidence_block = self._format_evidence(sources)
         try:
@@ -211,14 +237,14 @@ class FactCheckPipeline:
                 "key_points": [],
                 "used_sources": [s.url for s in sources[:3]],
             }
-        traces.append(
-            AgentTrace(
-                agent="VerdictAgent",
-                role="تركيب الحكم النهائي وكتابة الشرح",
-                summary=str(verdict_data.get("verdict", "UNVERIFIED")),
-                duration_ms=int((time.time() - verdict_started) * 1000),
-            )
+        verdict_trace = AgentTrace(
+            agent="VerdictAgent",
+            role="تركيب الحكم النهائي وكتابة الشرح",
+            summary=str(verdict_data.get("verdict", "UNVERIFIED")),
+            duration_ms=int((time.time() - verdict_started) * 1000),
         )
+        traces.append(verdict_trace)
+        await emit("agent:done", verdict_trace.model_dump())
 
         verdict_value = self._normalise_verdict(verdict_data.get("verdict"))
         confidence = self._clamp(verdict_data.get("confidence", 0.5))
@@ -244,6 +270,7 @@ class FactCheckPipeline:
             demo_mode=False,
         )
         cache.set(cache_key, result)
+        await emit("done", result.model_dump(mode="json"))
         return result
 
     # ----- helpers --------------------------------------------------------

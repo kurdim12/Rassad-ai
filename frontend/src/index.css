@@ -16,6 +16,19 @@
     background-attachment: fixed;
   }
 
+  html.light body {
+    @apply bg-slate-50 text-slate-900;
+    background-image:
+      radial-gradient(60% 50% at 50% 0%, rgba(47, 140, 255, 0.12) 0%, transparent 60%),
+      radial-gradient(40% 40% at 100% 100%, rgba(139, 92, 246, 0.10) 0%, transparent 50%);
+  }
+  html.light .glass {
+    @apply bg-white/70 border-slate-300/60;
+  }
+  html.light .chip {
+    @apply bg-slate-200/70 border-slate-300/60 text-slate-800;
+  }
+
   ::selection {
     @apply bg-brand-500/40 text-white;
   }

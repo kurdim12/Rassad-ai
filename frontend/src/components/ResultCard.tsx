@@ -1,13 +1,18 @@
+import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   CheckCircle2,
   Clock,
+  Copy,
+  Download,
   ExternalLink,
   Globe,
+  Share2,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import { CheckResult } from "../lib/api";
+import { useToast } from "../lib/toast";
 import { confidenceLabel, verdictMeta } from "../lib/verdict";
 
 interface Props {
@@ -17,11 +22,62 @@ interface Props {
 export function ResultCard({ result }: Props) {
   const meta = verdictMeta(result.verdict);
   const pct = Math.round(result.confidence * 100);
+  const toast = useToast();
+  const cardRef = useRef<HTMLDivElement | null>(null);
+
+  const shareText = `${meta.emoji} «${result.claim.slice(0, 90)}…»
+الحكم: ${meta.label} (${pct}%)
+${result.explanation_ar}
+
+— تحقّق على RASAD AI`;
+
+  const copyAll = async () => {
+    await navigator.clipboard.writeText(shareText);
+    toast.push("📋 تم نسخ ملخص الحكم.", "success");
+  };
+
+  const shareNative = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `RASAD AI · ${meta.label}`,
+          text: shareText,
+          url: typeof location !== "undefined"
+            ? `${location.origin}/?claim=${encodeURIComponent(result.claim.slice(0, 200))}`
+            : "",
+        });
+      } catch {
+        /* user cancelled */
+      }
+    } else {
+      copyAll();
+    }
+  };
+
+  const exportPng = async () => {
+    if (!cardRef.current) return;
+    try {
+      const { toPng } = await import("html-to-image");
+      const data = await toPng(cardRef.current, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: "#0b1220",
+      });
+      const a = document.createElement("a");
+      a.href = data;
+      a.download = `rasad-${result.id}.png`;
+      a.click();
+      toast.push("📥 تم تصدير البطاقة كصورة.", "success");
+    } catch (e) {
+      toast.push(`تعذّر التصدير: ${e instanceof Error ? e.message : "خطأ"}`, "error");
+    }
+  };
 
   return (
     <div className="space-y-6">
-      {/* Verdict header */}
+      {/* Verdict header (export target) */}
       <div
+        ref={cardRef}
         className={`glass rounded-3xl p-6 sm:p-8 border-2 ${meta.classBorder} ${meta.classBg} shadow-2xl ${meta.glow}`}
       >
         <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -38,7 +94,7 @@ export function ResultCard({ result }: Props) {
           </div>
 
           <div className="text-center sm:text-left">
-            <div className="text-4xl font-extrabold tabular-nums">{pct}%</div>
+            <AnimatedNumber value={pct} className="text-4xl font-extrabold tabular-nums" />
             <div className="text-xs text-slate-300">{confidenceLabel(result.confidence)}</div>
           </div>
         </div>
@@ -52,7 +108,16 @@ export function ResultCard({ result }: Props) {
           />
         </div>
 
-        <p className="mt-6 text-base sm:text-lg leading-relaxed text-slate-100">
+        <div className="mt-5 rounded-xl bg-black/20 border border-white/[0.04] p-4">
+          <div className="text-[11px] uppercase tracking-wider text-slate-400 mb-1">
+            الادعاء
+          </div>
+          <p className="text-sm sm:text-base leading-relaxed text-slate-100/90 line-clamp-4">
+            {result.claim}
+          </p>
+        </div>
+
+        <p className="mt-5 text-base sm:text-lg leading-relaxed text-slate-100">
           {result.explanation_ar}
         </p>
 
@@ -86,6 +151,25 @@ export function ResultCard({ result }: Props) {
             </span>
           )}
         </div>
+      </div>
+
+      {/* Action bar */}
+      <div className="flex flex-wrap items-center gap-2 -mt-2">
+        <button onClick={copyAll} className="btn-ghost text-sm">
+          <Copy className="h-4 w-4" />
+          نسخ الملخص
+        </button>
+        <button onClick={shareNative} className="btn-ghost text-sm">
+          <Share2 className="h-4 w-4" />
+          مشاركة
+        </button>
+        <button onClick={exportPng} className="btn-ghost text-sm">
+          <Download className="h-4 w-4" />
+          تصدير PNG
+        </button>
+        <span className="text-xs text-slate-500 mr-auto">
+          ID: <code className="font-mono">{result.id}</code>
+        </span>
       </div>
 
       {/* Key points */}
@@ -122,8 +206,11 @@ export function ResultCard({ result }: Props) {
                 rel="noreferrer"
                 className="group glass glass-hover rounded-xl p-4 block"
               >
-                <div className="flex items-start justify-between gap-2 mb-2">
-                  <div className="text-xs font-mono text-slate-400">{s.domain}</div>
+                <div className="flex items-start gap-2 mb-2">
+                  <Favicon domain={s.domain} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-mono text-slate-400 truncate">{s.domain}</div>
+                  </div>
                   <CredibilityBadge value={s.credibility} />
                 </div>
                 <div className="font-semibold text-sm leading-snug group-hover:text-brand-200 transition">
@@ -181,9 +268,58 @@ function CredibilityBadge({ value }: { value: number }) {
           : "text-slate-400 bg-slate-500/15";
   return (
     <span
-      className={`text-[10px] font-bold px-2 py-0.5 rounded-full tabular-nums ${color}`}
+      className={`text-[10px] font-bold px-2 py-0.5 rounded-full tabular-nums ${color} shrink-0`}
     >
       موثوقية {pct}٪
     </span>
   );
+}
+
+function Favicon({ domain }: { domain: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!domain || failed) {
+    return (
+      <div className="h-5 w-5 rounded bg-white/[0.06] shrink-0 flex items-center justify-center text-[10px] text-slate-400">
+        {domain?.[0]?.toUpperCase() || "?"}
+      </div>
+    );
+  }
+  return (
+    <img
+      src={`https://www.google.com/s2/favicons?domain=${domain}&sz=32`}
+      alt=""
+      width={20}
+      height={20}
+      onError={() => setFailed(true)}
+      className="h-5 w-5 rounded shrink-0 bg-white/5"
+      loading="lazy"
+    />
+  );
+}
+
+function AnimatedNumber({
+  value,
+  className = "",
+}: {
+  value: number;
+  className?: string;
+}) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const start = performance.now();
+    const from = n;
+    const to = value;
+    const dur = 800;
+    const tick = (now: number) => {
+      const p = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setN(Math.round(from + (to - from) * eased));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
+  return <div className={className}>{n}%</div>;
 }

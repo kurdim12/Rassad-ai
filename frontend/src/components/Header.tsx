@@ -1,11 +1,20 @@
-import { AlertCircle, Github, Sparkles } from "lucide-react";
+import { AlertCircle, Clock, Github, KeyRound, Sparkles } from "lucide-react";
 
 interface Props {
   demoMode: boolean | null;
   serverError: string | null;
+  onOpenSettings: () => void;
+  onOpenHistory: () => void;
+  historyCount: number;
 }
 
-export function Header({ demoMode, serverError }: Props) {
+export function Header({
+  demoMode,
+  serverError,
+  onOpenSettings,
+  onOpenHistory,
+  historyCount,
+}: Props) {
   return (
     <header className="sticky top-0 z-40 backdrop-blur-xl bg-slate-950/70 border-b border-white/[0.06]">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
@@ -50,6 +59,29 @@ export function Header({ demoMode, serverError }: Props) {
             </span>
           ) : null}
 
+          <button
+            onClick={onOpenHistory}
+            title="السجل"
+            className="btn-ghost text-sm relative"
+          >
+            <Clock className="h-4 w-4" />
+            <span className="hidden sm:inline">السجل</span>
+            {historyCount > 0 && (
+              <span className="absolute -top-1 -right-1 h-4 min-w-4 px-1 rounded-full bg-brand-500 text-[10px] font-bold text-white flex items-center justify-center">
+                {historyCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={onOpenSettings}
+            title="الإعدادات + إضافة مفتاح Gemini"
+            className="btn-ghost text-sm"
+          >
+            <KeyRound className="h-4 w-4" />
+            <span className="hidden sm:inline">المفتاح</span>
+          </button>
+
           <a
             href="https://github.com/kurdim12/rassad-ai"
             target="_blank"
@@ -57,7 +89,6 @@ export function Header({ demoMode, serverError }: Props) {
             className="btn-ghost text-sm"
           >
             <Github className="h-4 w-4" />
-            <span className="hidden sm:inline">GitHub</span>
           </a>
         </div>
       </div>

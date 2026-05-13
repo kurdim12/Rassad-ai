@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   FileText,
   Image as ImageIcon,
   Link as LinkIcon,
   Loader2,
+  ScanText,
   Search,
   Sparkles,
   Upload,
@@ -12,11 +13,16 @@ import {
 import {
   CheckResult,
   ImageCheckResult,
-  checkClaim,
   checkImage,
+  ocrImage,
+  streamCheck,
 } from "../lib/api";
-import { ResultCard } from "./ResultCard";
+import { pushHistory } from "../lib/storage";
+import { useToast } from "../lib/toast";
+import { AgentTimeline, TimelineStep } from "./AgentTimeline";
 import { ImageResultCard } from "./ImageResultCard";
+import { ResultCard } from "./ResultCard";
+import { VoiceButton } from "./VoiceButton";
 
 type Mode = "text" | "url" | "image";
 
@@ -27,20 +33,49 @@ const SAMPLES = [
   "الأردن أعلن استقلاله عام 1946",
 ];
 
-export function ClaimChecker() {
+export function ClaimChecker({
+  prefilledClaim,
+  prefilledResult,
+}: {
+  prefilledClaim?: string;
+  prefilledResult?: CheckResult | null;
+}) {
+  const toast = useToast();
   const [mode, setMode] = useState<Mode>("text");
-  const [text, setText] = useState("");
+  const [text, setText] = useState(prefilledClaim || "");
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
-  const [result, setResult] = useState<CheckResult | null>(null);
+  const [result, setResult] = useState<CheckResult | null>(prefilledResult || null);
   const [imageResult, setImageResult] = useState<ImageCheckResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [ocrLoading, setOcrLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [steps, setSteps] = useState<Record<string, TimelineStep>>({});
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        textareaRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
+    if (prefilledClaim) {
+      setText(prefilledClaim);
+      setMode("text");
+    }
+  }, [prefilledClaim]);
 
   const reset = () => {
     setResult(null);
     setImageResult(null);
     setError(null);
+    setSteps({});
   };
 
   const submit = async () => {
@@ -53,13 +88,54 @@ export function ClaimChecker() {
         setImageResult(res);
       } else {
         const payload = mode === "text" ? { text } : { url };
-        if (!Object.values(payload)[0]?.trim())
-          throw new Error("الرجاء إدخال محتوى للتحقق منه.");
-        const res = await checkClaim(payload);
-        setResult(res);
+        const value = Object.values(payload)[0];
+        if (!value?.trim()) throw new Error("الرجاء إدخال محتوى للتحقق منه.");
+
+        let last: CheckResult | null = null;
+        for await (const ev of streamCheck(payload)) {
+          if (ev.event === "agent:start") {
+            setSteps((s) => ({
+              ...s,
+              [ev.payload.agent]: { agent: ev.payload.agent, state: "running" },
+            }));
+          } else if (ev.event === "agent:done") {
+            setSteps((s) => ({
+              ...s,
+              [ev.payload.agent]: {
+                agent: ev.payload.agent,
+                state: "done",
+                summary: ev.payload.summary,
+                duration_ms: ev.payload.duration_ms,
+              },
+            }));
+          } else if (ev.event === "done") {
+            last = ev.payload;
+          } else if (ev.event === "error") {
+            throw new Error(ev.payload.message);
+          }
+        }
+        if (last) {
+          setResult(last);
+          pushHistory({
+            id: last.id,
+            claim: last.claim,
+            verdict: last.verdict,
+            confidence: last.confidence,
+            at: Date.now(),
+            result: last,
+          });
+          // Update URL so the result is shareable.
+          const u = new URL(window.location.href);
+          u.searchParams.set("claim", last.claim.slice(0, 200));
+          window.history.replaceState({}, "", u.toString());
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "حدث خطأ غير متوقع.");
+      toast.push(
+        `خطأ: ${e instanceof Error ? e.message : "غير معروف"}`,
+        "error",
+      );
     } finally {
       setLoading(false);
     }
@@ -67,6 +143,27 @@ export function ClaimChecker() {
 
   const onKey = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
+  };
+
+  const runOCR = async (f: File) => {
+    setOcrLoading(true);
+    try {
+      const t = await ocrImage(f);
+      if (t.trim()) {
+        setText(t);
+        setMode("text");
+        toast.push("✅ تم استخراج النص من الصورة. تحقق الآن.", "success");
+      } else {
+        toast.push("لم نتمكن من استخراج نص (يحتاج مفتاح Gemini).", "info");
+      }
+    } catch (e) {
+      toast.push(
+        `تعذّر استخراج النص: ${e instanceof Error ? e.message : "خطأ"}`,
+        "error",
+      );
+    } finally {
+      setOcrLoading(false);
+    }
   };
 
   return (
@@ -122,17 +219,26 @@ export function ClaimChecker() {
           </div>
 
           {mode === "text" && (
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={onKey}
-              placeholder="مثلاً: «فيتامين سي يعالج فيروس كورونا»"
-              rows={5}
-              dir="rtl"
-              className="w-full rounded-2xl bg-slate-900/60 border border-white/[0.08]
-                         focus:border-brand-400/50 focus:ring-2 focus:ring-brand-400/20
-                         px-4 py-3 text-base resize-none outline-none transition"
-            />
+            <div className="relative">
+              <textarea
+                ref={textareaRef}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={onKey}
+                placeholder="مثلاً: «فيتامين سي يعالج فيروس كورونا»  ·  ⌘K للتركيز  ·  ⌘↵ للإرسال"
+                rows={5}
+                dir="rtl"
+                className="w-full rounded-2xl bg-slate-900/60 border border-white/[0.08]
+                           focus:border-brand-400/50 focus:ring-2 focus:ring-brand-400/20
+                           px-4 py-3 pl-12 text-base resize-none outline-none transition"
+              />
+              <div className="absolute left-2 bottom-2">
+                <VoiceButton onResult={(t) => setText(t)} />
+              </div>
+              <div className="absolute left-2 top-2 text-[10px] text-slate-500 tabular-nums">
+                {text.length} / 4000
+              </div>
+            </div>
           )}
 
           {mode === "url" && (
@@ -149,7 +255,12 @@ export function ClaimChecker() {
           )}
 
           {mode === "image" && (
-            <ImageDropzone file={file} setFile={setFile} />
+            <ImageDropzone
+              file={file}
+              setFile={setFile}
+              onOCR={runOCR}
+              ocrLoading={ocrLoading}
+            />
           )}
 
           {/* Samples */}
@@ -210,7 +321,7 @@ export function ClaimChecker() {
               exit={{ opacity: 0 }}
               className="mt-6"
             >
-              <LoadingSteps />
+              <AgentTimeline steps={steps} />
             </motion.div>
           )}
           {result && !loading && (
@@ -244,87 +355,78 @@ export function ClaimChecker() {
 function ImageDropzone({
   file,
   setFile,
+  onOCR,
+  ocrLoading,
 }: {
   file: File | null;
   setFile: (f: File | null) => void;
+  onOCR: (f: File) => void;
+  ocrLoading: boolean;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const preview = file ? URL.createObjectURL(file) : null;
   return (
-    <label
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const f = e.dataTransfer.files?.[0];
-        if (f) setFile(f);
-      }}
-      className={`flex flex-col items-center justify-center gap-3 rounded-2xl
-                  border-2 border-dashed px-6 py-10 cursor-pointer transition
-                  ${
-                    dragOver
-                      ? "border-brand-400/60 bg-brand-400/5"
-                      : "border-white/[0.10] bg-slate-900/40 hover:bg-slate-900/60"
-                  }`}
-    >
-      {preview ? (
-        <img
-          src={preview}
-          alt="معاينة"
-          className="max-h-48 rounded-xl ring-1 ring-white/10"
+    <div className="space-y-3">
+      <label
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragOver(true);
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) setFile(f);
+        }}
+        className={`flex flex-col items-center justify-center gap-3 rounded-2xl
+                    border-2 border-dashed px-6 py-10 cursor-pointer transition
+                    ${
+                      dragOver
+                        ? "border-brand-400/60 bg-brand-400/5"
+                        : "border-white/[0.10] bg-slate-900/40 hover:bg-slate-900/60"
+                    }`}
+      >
+        {preview ? (
+          <img
+            src={preview}
+            alt="معاينة"
+            className="max-h-48 rounded-xl ring-1 ring-white/10"
+          />
+        ) : (
+          <Upload className="h-10 w-10 text-slate-500" />
+        )}
+        <div className="text-center">
+          <p className="text-sm font-medium">
+            {file ? file.name : "اسحب صورة هنا أو انقر للاختيار"}
+          </p>
+          <p className="text-xs text-slate-500 mt-1">
+            PNG, JPG, WebP — حتى 10MB
+          </p>
+        </div>
+        <input
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => setFile(e.target.files?.[0] || null)}
         />
-      ) : (
-        <Upload className="h-10 w-10 text-slate-500" />
-      )}
-      <div className="text-center">
-        <p className="text-sm font-medium">
-          {file ? file.name : "اسحب صورة هنا أو انقر للاختيار"}
-        </p>
-        <p className="text-xs text-slate-500 mt-1">PNG, JPG, WebP — حتى 10MB</p>
-      </div>
-      <input
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => setFile(e.target.files?.[0] || null)}
-      />
-    </label>
-  );
-}
+      </label>
 
-function LoadingSteps() {
-  const steps = [
-    "تحليل لغوي للادعاء",
-    "البحث في محركات متعددة",
-    "تقييم موثوقية المصادر",
-    "رصد مؤشرات التلاعب",
-    "تركيب الحكم النهائي",
-  ];
-  return (
-    <div className="glass rounded-2xl p-6">
-      <div className="flex items-center gap-3 mb-4">
-        <Loader2 className="h-5 w-5 text-brand-300 animate-spin" />
-        <h3 className="font-semibold">نظام الوكلاء يعمل…</h3>
-      </div>
-      <ul className="space-y-2">
-        {steps.map((s, i) => (
-          <li
-            key={s}
-            className="flex items-center gap-3 text-sm text-slate-300"
-            style={{ animationDelay: `${i * 0.12}s` }}
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-brand-400 animate-pulse" />
-            {s}
-          </li>
-        ))}
-      </ul>
-      <div className="mt-4 h-1 rounded-full bg-white/5 overflow-hidden">
-        <div className="h-full w-1/3 bg-gradient-to-r from-brand-400 to-violet-400 shimmer rounded-full" />
-      </div>
+      {file && (
+        <button
+          type="button"
+          onClick={() => onOCR(file)}
+          disabled={ocrLoading}
+          className="btn-ghost text-sm w-full"
+        >
+          {ocrLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <ScanText className="h-4 w-4" />
+          )}
+          استخرج النص من الصورة (OCR) ثم تحقق منه كنص
+        </button>
+      )}
     </div>
   );
 }

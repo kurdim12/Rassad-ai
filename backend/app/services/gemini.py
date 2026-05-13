@@ -20,13 +20,14 @@ _FALLBACK_MODEL = "gemini-1.5-flash"
 
 
 class GeminiClient:
-    def __init__(self) -> None:
+    def __init__(self, api_key: Optional[str] = None) -> None:
         self.settings = get_settings()
         self._configured = False
         self._model = None
-        if self.settings.gemini_api_key:
+        self._api_key = api_key or self.settings.gemini_api_key
+        if self._api_key:
             try:
-                genai.configure(api_key=self.settings.gemini_api_key)
+                genai.configure(api_key=self._api_key)
                 self._model = genai.GenerativeModel(_MODEL_NAME)
                 self._configured = True
             except Exception as exc:  # pragma: no cover - defensive
@@ -40,6 +41,13 @@ class GeminiClient:
     @property
     def available(self) -> bool:
         return self._configured
+
+    @classmethod
+    def for_request(cls, api_key: Optional[str]) -> "GeminiClient":
+        """Build a client that honours a request-scoped key (header override)."""
+        if api_key and api_key.strip():
+            return cls(api_key=api_key.strip())
+        return get_gemini()
 
     @retry(
         stop=stop_after_attempt(2),
